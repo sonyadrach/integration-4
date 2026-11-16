@@ -1,16 +1,18 @@
 """Entry point for the forecasting service (forecast-api)."""
 import logging
+import json
+import sys
 import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import joblib
+import mlflow
+from mlflow.tracking import MlflowClient
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from .model import CAT, NUM, train_model
 from .schemas import PredictRequest, PredictResponse
 
 # Used for local runs outside Docker. In the container, orchestrator
@@ -24,30 +26,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger("forecast-api")
 
-MODEL_PATH = Path(os.getenv("MODEL_PATH", "/app/artifacts/model.pkl"))
-MODEL_VERSION = os.getenv("MODEL_VERSION", "v0.1.0")
+MODEL_NAME = os.getenv("MODEL_NAME", "house-price")
+MODEL_ALIAS = os.getenv("MODEL_ALIAS", "prod")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the model once at startup instead of loading it per request."""
-    if MODEL_PATH.exists():
-        app.state.model = joblib.load(MODEL_PATH)
-        logger.info("Model loaded from %s", MODEL_PATH)
-    else:
-        # Development fallback for running without a pre-built image.
-        # In production, the model artifact is required.
-        logger.warning("Artifact not found - training at startup (dev-only)")
-        app.state.model = train_model()
+    """Load the model and stats from MLflow registry once at startup."""
+    client = MlflowClient()
+    try:
+        logger.info(f"Resolving model alias '{MODEL_ALIAS}' for '{MODEL_NAME}'...")
+        mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+        
+        logger.info(f"Loading model version {mv.version}...")
+        app.state.model = mlflow.pyfunc.load_model(f"models:/{MODEL_NAME}@{MODEL_ALIAS}")
+        app.state.model_version = mv.version
+        
+        logger.info("Downloading data_stats.json from artifacts...")
+        stats_path = mlflow.artifacts.download_artifacts(
+            run_id=mv.run_id, artifact_path="data_stats.json"
+        )
+        app.state.data_stats = json.loads(Path(stats_path).read_text())
+        
+        logger.info("Model and stats loaded successfully.")
+        
+    except mlflow.exceptions.RestException as e:
+        logger.error(
+            f"CRITICAL ERROR: Failed to resolve alias '{MODEL_ALIAS}' "
+            f"for model '{MODEL_NAME}'. Reason: {e}"
+        )
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"CRITICAL ERROR: Unexpected error loading model: {e}")
+        sys.exit(1)
 
     yield
 
     app.state.model = None
+    app.state.data_stats = None
 
 
 app = FastAPI(
     title="Forecast API",
-    version=MODEL_VERSION,
     lifespan=lifespan,
 )
 
@@ -57,21 +77,21 @@ def health():
     """Health check endpoint used by the orchestrator."""
     return {
         "status": "ok",
-        "model_version": MODEL_VERSION,
+        "model_version": app.state.model_version,
     }
+
+
+@app.get("/model/data-stats")
+def get_data_stats():
+    """Return descriptive statistics loaded from MLflow artifacts (Завдання 2.12)."""
+    return app.state.data_stats
 
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
-    """Predict a house sale price from the provided Ames Housing features.
-
-    This is a regular synchronous endpoint rather than ``async def``.
-    FastAPI executes synchronous endpoints in a thread pool, preventing
-    CPU-bound inference from blocking the event loop.
-    """
+    """Predict a house sale price from the provided Ames Housing features."""
     t0 = time.perf_counter()
 
-    # Wire contract -> exact Ames dataset column names.
     df = pd.DataFrame([{
         "GrLivArea": req.gr_liv_area,
         "TotalBsmtSF": req.total_bsmt_sf,
@@ -81,17 +101,18 @@ def predict(req: PredictRequest):
         "MSZoning": req.ms_zoning,
     }])
 
-    price = float(app.state.model.predict(df[NUM + CAT])[0])
+    price = float(app.state.model.predict(df)[0])
     latency_ms = round((time.perf_counter() - t0) * 1000, 2)
 
     logger.info(
-        "predict: %.2f USD (%.2f ms)",
+        "predict: %.2f USD (%.2f ms) [version: %s]",
         price,
         latency_ms,
+        app.state.model_version
     )
 
     return PredictResponse(
         predicted_price=price,
-        model_version=MODEL_VERSION,
+        model_version=app.state.model_version,
         latency_ms=latency_ms,
     )

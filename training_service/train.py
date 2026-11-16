@@ -6,7 +6,7 @@ import joblib
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 
-from .model import (
+from ..forecast_service.app.model import (
     CAT,
     NUM,
     TARGET,

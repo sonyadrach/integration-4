@@ -9,6 +9,7 @@ services:
       - db_password
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 3s
@@ -21,6 +22,7 @@ services:
       dockerfile: forecast_service/Dockerfile
     environment:
       MODEL_VERSION: ${MODEL_VERSION}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
 
   orders-api:
     build:
@@ -42,11 +44,40 @@ services:
       postgres:
         condition: service_healthy
 
-volumes:
-  pgdata:
-
 secrets:
   db_password:
     file: ./secrets/db_password
   jwt_secret_key:
     file: ./secrets/jwt_secret_key
+
+mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.1.0
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql+psycopg://orders:$$(cat /run/secrets/db_password)@postgres/mlflow
+      --serve-artifacts --artifacts-destination /mlartifacts
+    secrets: [db_password]
+    volumes: [mlartifacts:/mlartifacts]
+    ports: ["${MLFLOW_PORT:-5000}:5000"]
+    depends_on: [postgres]
+
+trainer:
+    build:
+      context: .
+      dockerfile: training_service/Dockerfile
+    profiles: ["train"] 
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000 
+      MLFLOW_EXPERIMENT_NAME: house-price    
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+    secrets:
+      - db_password
+    depends_on:
+      - mlflow
+      - postgres
+
+volumes:
+  pgdata:
+  mlartifacts:
