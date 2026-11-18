@@ -83,7 +83,7 @@ def health():
 
 @app.get("/model/data-stats")
 def get_data_stats():
-    """Return descriptive statistics loaded from MLflow artifacts (Завдання 2.12)."""
+    """Return descriptive statistics loaded from MLflow artifacts"""
     return app.state.data_stats
 
 
