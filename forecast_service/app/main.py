@@ -42,13 +42,21 @@ async def lifespan(app: FastAPI):
         app.state.model = mlflow.pyfunc.load_model(f"models:/{MODEL_NAME}@{MODEL_ALIAS}")
         app.state.model_version = mv.version
         
-        logger.info("Downloading data_stats.json from artifacts...")
-        stats_path = mlflow.artifacts.download_artifacts(
-            run_id=mv.run_id, artifact_path="data_stats.json"
-        )
-        app.state.data_stats = json.loads(Path(stats_path).read_text())
-        
-        logger.info("Model and stats loaded successfully.")
+        if mv.run_id:
+            try:
+                logger.info("Downloading data_stats.json from artifacts...")
+                stats_path = mlflow.artifacts.download_artifacts(
+                    run_id=mv.run_id, artifact_path="data_stats.json"
+                )
+                app.state.data_stats = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+            except Exception as stats_err:
+                logger.warning(f"Could not load data_stats.json for run {mv.run_id}: {stats_err}")
+                app.state.data_stats = {"detail": "data_stats.json not found for this model version"}
+        else:
+            logger.warning(f"Model version {mv.version} has no linked run_id; skipping data_stats.json.")
+            app.state.data_stats = {"detail": "No run_id linked to this model version"}
+
+        logger.info("Model loaded successfully.")
         
     except mlflow.exceptions.RestException as e:
         logger.error(
@@ -93,12 +101,12 @@ def predict(req: PredictRequest):
     t0 = time.perf_counter()
 
     df = pd.DataFrame([{
-        "GrLivArea": req.gr_liv_area,
-        "TotalBsmtSF": req.total_bsmt_sf,
-        "GarageArea": req.garage_area,
-        "YearBuilt": req.year_built,
-        "OverallQual": req.overall_qual,
-        "MSZoning": req.ms_zoning,
+        "GrLivArea": int(req.gr_liv_area),
+        "TotalBsmtSF": int(req.total_bsmt_sf),
+        "GarageArea": int(req.garage_area),
+        "YearBuilt": int(req.year_built),
+        "OverallQual": int(req.overall_qual),
+        "MSZoning": str(req.ms_zoning),
     }])
 
     price = float(app.state.model.predict(df)[0])

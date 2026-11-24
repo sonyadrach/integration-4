@@ -6,7 +6,7 @@ import mlflow
 from mlflow.models.signature import infer_signature
 from mlflow.tracking import MlflowClient
 from sklearn.model_selection import train_test_split, KFold, cross_val_score
-from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
+from sklearn.metrics import r2_score, mean_absolute_error, root_mean_squared_error, mean_absolute_percentage_error
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.impute import SimpleImputer
@@ -27,6 +27,8 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_
 
 mlflow.set_experiment("house-price")
 
+stats_dict = df.describe().to_dict()
+
 with mlflow.start_run(run_name="baseline-ridge"):
     num_prep = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
@@ -44,16 +46,21 @@ with mlflow.start_run(run_name="baseline-ridge"):
         ("prep", prep_ridge),
         ("model", Ridge(alpha=1.0))
     ])
-    
+
     baseline_model.fit(X_train, y_train)
     preds = baseline_model.predict(X_test)
-    
+
     mlflow.log_metrics({
         "test_r2": r2_score(y_test, preds),
         "test_mae": mean_absolute_error(y_test, preds),
-        "test_rmse": mean_squared_error(y_test, preds, squared=False),
-        "test_mape": mean_absolute_percentage_error(y_test, preds)
+        "test_rmse": root_mean_squared_error(y_test, preds),
+        "test_mape": mean_absolute_percentage_error(y_test, preds),
     })
+
+    mlflow.log_dict(stats_dict, "data_stats.json")
+
+    signature = infer_signature(X_train, baseline_model.predict(X_train))
+    mlflow.sklearn.log_model(baseline_model, name="model", signature=signature)
 
 def build_model(params: dict) -> Pipeline:
     prep = ColumnTransformer([
@@ -104,7 +111,7 @@ with mlflow.start_run(run_name="xgboost-final") as run:
     mlflow.log_metrics({
         "test_r2": r2_score(y_test, preds),
         "test_mae": mean_absolute_error(y_test, preds),
-        "test_rmse": mean_squared_error(y_test, preds, squared=False),
+        "test_rmse": root_mean_squared_error(y_test, preds),
         "test_mape": mean_absolute_percentage_error(y_test, preds)
     })
     

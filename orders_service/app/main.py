@@ -120,8 +120,6 @@ def get_current_user(
 
     return user
 
-Base.metadata.create_all(bind=engine)
-
 app = FastAPI(
     title="Orders API",
     version="0.2.0",
@@ -134,17 +132,6 @@ app = FastAPI(
     retry=retry_if_exception_type(httpx.TimeoutException),
     reraise=True,
 )
-def _request_prediction(payload: dict) -> float:
-    """Request a price prediction from the forecasting service."""
-    model_payload = {k: v for k, v in payload.items() if k in FORECAST_FEATURE_KEYS}
-
-    with httpx.Client(timeout=FORECAST_TIMEOUT) as client:
-        response = client.post(
-            f"{FORECAST_URL}/predict",
-            json=model_payload,
-        )
-        response.raise_for_status()
-        return float(response.json()["predicted_price"])
 
 async def _request_prediction_async(payload: dict) -> float:
     """Async request a price prediction from the forecasting service."""
@@ -155,7 +142,10 @@ async def _request_prediction_async(payload: dict) -> float:
         json=model_payload,
     )
     response.raise_for_status()
-    return float(response.json()["predicted_price"])
+    body = response.json()
+    price = float(body["predicted_price"])
+    model_version = body.get("model_version")
+    return price, str(model_version) if model_version is not None else None
 
 async def process_order_forecast_background(order_id: int):
     """Фонова задача для отримання прогнозу."""
@@ -169,12 +159,13 @@ async def process_order_forecast_background(order_id: int):
         features = {k: getattr(order, k) for k in FORECAST_FEATURE_KEYS}
         
         try:
-            price = await _request_prediction_async(features)
+            price, model_version = await _request_prediction_async(features)
             
             order.predicted_price = price
+            order.model_version = model_version
             order.status = "priced"
             
-            logger.info("Order %s forecast success: %s USD at %s", order_id, price, datetime.now(timezone.utc).isoformat())
+            logger.info("Order %s forecast success: %s USD at %s", order_id, price, model_version, datetime.now(timezone.utc).isoformat())
             
         except Exception as exc:
             order.status = "failed"
@@ -316,12 +307,16 @@ async def create_orders_batch(
         
         if isinstance(forecast_res, Exception):
             logger.warning(f"Batch prediction failed for order {order_db.id}: {forecast_res}")
+            order_db.status = "failed"
             result_item.status = "failed"
             result_item.error = str(forecast_res)
         else:
-            order_db.predicted_price = forecast_res
+            price, model_version = forecast_res
+            order_db.predicted_price = price
+            order_db.model_version = model_version
+            order_db.status = "priced"
             result_item.status = "priced"
-            result_item.predicted_price = forecast_res
+            result_item.predicted_price = price
             
         results_out.append(result_item)
 
@@ -414,7 +409,7 @@ def update_order(
 
     if has_property_changes:
         order.status = "pending"
-        
+        order.model_version = None
         order.predicted_price = None
         
         db.commit()

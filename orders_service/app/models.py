@@ -26,6 +26,7 @@ class Order(Base):
         nullable=False,
     )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    model_version: Mapped[str] = mapped_column(String(32), nullable=True)
 
 class User(Base):
     """Database model representing a registered user."""
